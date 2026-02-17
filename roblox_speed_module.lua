@@ -13,10 +13,12 @@ getgenv().SpeedModule = {
 }
 local SM = getgenv().SpeedModule
 
--- 安全获取角色和人形对象
+-- 安全获取角色和人形对象（修复版：等待角色加载）
 local function getCharacter()
     local success, result = pcall(function()
+        -- 先等待角色存在
         SM.Character = Players.LocalPlayer.Character or Players.LocalPlayer.CharacterAdded:Wait()
+        -- 再等待Humanoid加载
         SM.Humanoid = SM.Character:WaitForChild("Humanoid", 10)
         return true
     end)
@@ -32,16 +34,22 @@ function SM:setWalkSpeed(speed)
     local numSpeed = tonumber(speed) or 16
     self.CurrentWalkSpeed = math.clamp(numSpeed, 0, 500) -- 限制0-500，防止数值异常
     
-    if getCharacter() and not (getgenv().FlyModule and getgenv().FlyModule.IsFlying) then
-        self.Humanoid.WalkSpeed = self.CurrentWalkSpeed
-        print("[⚡ 速度模块] 地面速度已设置为：" .. self.CurrentWalkSpeed)
+    -- 先获取角色，再设置速度
+    if getCharacter() then
+        -- 只有不在飞行时才设置速度
+        local flyModule = getgenv().FlyModule
+        if not (flyModule and flyModule.IsFlying) then
+            self.Humanoid.WalkSpeed = self.CurrentWalkSpeed
+            print("[⚡ 速度模块] 地面速度已设置为：" .. self.CurrentWalkSpeed)
+        end
     end
 end
 
 -- 初始化速度模块
 local function init()
-    -- 初始化默认速度
-    if getCharacter() then
+    -- 初始化默认速度（先等待角色加载）
+    getCharacter()
+    if self.Humanoid then
         self.Humanoid.WalkSpeed = SM.CurrentWalkSpeed
     end
     
