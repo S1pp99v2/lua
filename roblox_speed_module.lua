@@ -8,42 +8,36 @@ local UserInputService = game:GetService("UserInputService")
 -- 全局变量（暴露给UI/飞行模块）
 getgenv().SpeedModule = {
     CurrentWalkSpeed = 16,
-    Character = nil,
-    Humanoid = nil
+    -- 不再在这里预存Character和Humanoid，避免空值
 }
 local SM = getgenv().SpeedModule
 
--- 安全获取角色和人形对象（彻底修复版）
-local function getCharacter()
-    -- 先清空旧值
-    SM.Character = nil
-    SM.Humanoid = nil
+-- 安全获取当前有效的Humanoid
+local function getHumanoid()
+    local player = Players.LocalPlayer
+    if not player then return nil end
 
-    local success, result = pcall(function()
-        -- 等待角色
-        SM.Character = Players.LocalPlayer.Character or Players.LocalPlayer.CharacterAdded:Wait()
-        if not SM.Character then
-            error("角色对象获取失败")
-        end
+    local char = player.Character
+    if not char then return nil end
 
-        -- 等待Humanoid，最多等10秒
-        SM.Humanoid = SM.Character:WaitForChild("Humanoid", 10)
-        if not SM.Humanoid then
-            error("Humanoid 未在10秒内加载完成")
-        end
-
-        return true
-    end)
-
-    if not success then
-        warn("[速度模块] 获取角色失败：" .. tostring(result))
-        -- 确保失败后对象为nil，避免后续误访问
-        SM.Character = nil
-        SM.Humanoid = nil
-        return false
+    local humanoid = char:FindFirstChild("Humanoid")
+    if humanoid and humanoid:IsDescendantOf(game) then
+        return humanoid
     end
+    return nil
+end
 
-    return true
+-- 应用速度到Humanoid（内部函数）
+local function applySpeedToHumanoid(humanoid, speed)
+    if not humanoid then return false end
+    local success, err = pcall(function()
+        -- 只有不在飞行时才应用速度
+        local flyModule = getgenv().FlyModule
+        if not (flyModule and flyModule.IsFlying) then
+            humanoid.WalkSpeed = speed
+        end
+    end)
+    return success
 end
 
 -- 设置地面速度（暴露函数）
@@ -51,39 +45,21 @@ function SM:setWalkSpeed(speed)
     local numSpeed = tonumber(speed) or 16
     self.CurrentWalkSpeed = math.clamp(numSpeed, 0, 500)
 
-    -- 先确保角色和Humanoid存在
-    if not self.Humanoid then
-        if not getCharacter() then
-            warn("[速度模块] 无法设置速度：角色或Humanoid不存在")
-            return
+    -- 尝试应用到当前Humanoid（如果存在）
+    local humanoid = getHumanoid()
+    if humanoid then
+        if applySpeedToHumanoid(humanoid, self.CurrentWalkSpeed) then
+            print("[⚡ 速度模块] 地面速度已设置为：" .. self.CurrentWalkSpeed)
+        else
+            print("[⚡ 速度模块] 速度值已更新为：" .. self.CurrentWalkSpeed .. "，将在角色重生时自动应用")
         end
-    end
-
-    -- 只有不在飞行时才设置速度
-    local flyModule = getgenv().FlyModule
-    if not (flyModule and flyModule.IsFlying) then
-        self.Humanoid.WalkSpeed = self.CurrentWalkSpeed
-        print("[⚡ 速度模块] 地面速度已设置为：" .. self.CurrentWalkSpeed)
+    else
+        print("[⚡ 速度模块] 速度值已更新为：" .. self.CurrentWalkSpeed .. "，将在角色加载后自动应用")
     end
 end
 
 -- 初始化速度模块
 local function init()
-    -- 先尝试获取角色，失败则延迟重试
-    if not getCharacter() then
-        warn("[速度模块] 首次获取角色失败，将在1秒后重试...")
-        task.wait(1)
-        getCharacter() -- 第二次尝试
-    end
-
-    -- 只有成功获取到Humanoid才设置初始速度
-    if SM.Humanoid then
-        SM.Humanoid.WalkSpeed = SM.CurrentWalkSpeed
-        print("[速度模块] 初始速度已设置为：" .. SM.CurrentWalkSpeed)
-    else
-        warn("[速度模块] 无法设置初始速度：Humanoid仍不存在，将在角色重生时自动设置")
-    end
-
     -- 绑定+/-键调速
     UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed then return end
@@ -94,13 +70,21 @@ local function init()
         end
     end)
 
-    -- 角色重生重置速度
-    Players.LocalPlayer.CharacterAdded:Connect(function()
-        task.wait(0.5)
-        -- 重生后重新获取角色并设置速度
-        getCharacter()
-        SM:setWalkSpeed(SM.CurrentWalkSpeed)
+    -- 角色重生时自动应用速度
+    Players.LocalPlayer.CharacterAdded:Connect(function(char)
+        -- 等待Humanoid加载
+        local humanoid = char:WaitForChild("Humanoid", 10)
+        if humanoid then
+            applySpeedToHumanoid(humanoid, SM.CurrentWalkSpeed)
+            print("[⚡ 速度模块] 角色重生，已自动应用速度：" .. SM.CurrentWalkSpeed)
+        end
     end)
+
+    -- 首次尝试应用速度（如果角色已存在）
+    local initialHumanoid = getHumanoid()
+    if initialHumanoid then
+        applySpeedToHumanoid(initialHumanoid, SM.CurrentWalkSpeed)
+    end
 
     print("[✅ 速度模块] 加载成功 | +/-键调节速度（每次±10）")
 end
