@@ -11,6 +11,10 @@ local LocalPlayer = Players.LocalPlayer
 local UI = nil
 local MenuOpen = false
 
+-- 全局滑块更新函数（修复：不用SetAttribute存函数）
+local WalkSpeedSliderSetValue = nil
+local FlySpeedSliderSetValue = nil
+
 -- ===================== 核心配置 =====================
 local Config = {
     -- 速度配置
@@ -346,20 +350,11 @@ end
 local function updateSpeedUIStatus()
     if not UI then return end
     
-    local walkSpeedSlider = UI:FindFirstChild("MainMenu"):FindFirstChild("ContentContainer"):FindFirstChild("SpeedCard"):FindFirstChild("SliderContainer")
-    if walkSpeedSlider then
-        local setValue = walkSpeedSlider:GetAttribute("SetValue")
-        if setValue then
-            setValue(Config.WalkSpeed)
-        end
+    if WalkSpeedSliderSetValue then
+        WalkSpeedSliderSetValue(Config.WalkSpeed)
     end
-    
-    local flySpeedSlider = UI:FindFirstChild("MainMenu"):FindFirstChild("ContentContainer"):FindFirstChild("FlyCard"):FindFirstChild("SliderContainer")
-    if flySpeedSlider then
-        local setValue = flySpeedSlider:GetAttribute("SetValue")
-        if setValue then
-            setValue(Config.FlySpeed)
-        end
+    if FlySpeedSliderSetValue then
+        FlySpeedSliderSetValue(Config.FlySpeed)
     end
 end
 
@@ -489,8 +484,8 @@ local function createUI()
         end
     )
     walkSpeedSlider.SetTitle("地面移动速度 (0-500)")
-    -- 存储更新函数到UI属性
-    walkSpeedSlider.Container:SetAttribute("SetValue", walkSpeedSlider.SetValue)
+    -- 修复：把更新函数存到全局变量，不用SetAttribute
+    WalkSpeedSliderSetValue = walkSpeedSlider.SetValue
 
     local SpeedResetBtn = Instance.new("TextButton")
     SpeedResetBtn.Parent = SpeedCard
@@ -507,7 +502,9 @@ local function createUI()
 
     SpeedResetBtn.MouseButton1Click:Connect(function()
         applyWalkSpeed(16)
-        walkSpeedSlider.SetValue(16)
+        if WalkSpeedSliderSetValue then
+            WalkSpeedSliderSetValue(16)
+        end
         tweenUI(SpeedResetBtn, {BackgroundColor3 = STYLES.Colors.Accent}, 0.1)
         task.wait(0.2)
         tweenUI(SpeedResetBtn, {BackgroundColor3 = STYLES.Colors.Danger}, 0.1)
@@ -595,8 +592,8 @@ local function createUI()
         end
     )
     flySpeedSlider.SetTitle("飞行速度 (10-200)")
-    -- 存储更新函数到UI属性
-    flySpeedSlider.Container:SetAttribute("SetValue", flySpeedSlider.SetValue)
+    -- 修复：把更新函数存到全局变量，不用SetAttribute
+    FlySpeedSliderSetValue = flySpeedSlider.SetValue
 
     -- ========== 菜单开关逻辑 ==========
     local function toggleMenu()
