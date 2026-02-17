@@ -49,8 +49,8 @@ end
 local function init()
     -- 初始化默认速度（先等待角色加载）
     getCharacter()
-    if self.Humanoid then
-        self.Humanoid.WalkSpeed = SM.CurrentWalkSpeed
+    if SM.Humanoid then -- 这里用 SM.Humanoid，而不是 self.Humanoid
+        SM.Humanoid.WalkSpeed = SM.CurrentWalkSpeed
     end
     
     -- 绑定+/-键调速
