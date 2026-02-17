@@ -13,46 +13,77 @@ getgenv().SpeedModule = {
 }
 local SM = getgenv().SpeedModule
 
--- 安全获取角色和人形对象（修复版：等待角色加载）
+-- 安全获取角色和人形对象（彻底修复版）
 local function getCharacter()
+    -- 先清空旧值
+    SM.Character = nil
+    SM.Humanoid = nil
+
     local success, result = pcall(function()
-        -- 先等待角色存在
+        -- 等待角色
         SM.Character = Players.LocalPlayer.Character or Players.LocalPlayer.CharacterAdded:Wait()
-        -- 再等待Humanoid加载
+        if not SM.Character then
+            error("角色对象获取失败")
+        end
+
+        -- 等待Humanoid，最多等10秒
         SM.Humanoid = SM.Character:WaitForChild("Humanoid", 10)
+        if not SM.Humanoid then
+            error("Humanoid 未在10秒内加载完成")
+        end
+
         return true
     end)
+
     if not success then
-        warn("[速度模块] 获取角色失败：" .. result)
+        warn("[速度模块] 获取角色失败：" .. tostring(result))
+        -- 确保失败后对象为nil，避免后续误访问
+        SM.Character = nil
+        SM.Humanoid = nil
         return false
     end
+
     return true
 end
 
 -- 设置地面速度（暴露函数）
 function SM:setWalkSpeed(speed)
     local numSpeed = tonumber(speed) or 16
-    self.CurrentWalkSpeed = math.clamp(numSpeed, 0, 500) -- 限制0-500，防止数值异常
-    
-    -- 先获取角色，再设置速度
-    if getCharacter() then
-        -- 只有不在飞行时才设置速度
-        local flyModule = getgenv().FlyModule
-        if not (flyModule and flyModule.IsFlying) then
-            self.Humanoid.WalkSpeed = self.CurrentWalkSpeed
-            print("[⚡ 速度模块] 地面速度已设置为：" .. self.CurrentWalkSpeed)
+    self.CurrentWalkSpeed = math.clamp(numSpeed, 0, 500)
+
+    -- 先确保角色和Humanoid存在
+    if not self.Humanoid then
+        if not getCharacter() then
+            warn("[速度模块] 无法设置速度：角色或Humanoid不存在")
+            return
         end
+    end
+
+    -- 只有不在飞行时才设置速度
+    local flyModule = getgenv().FlyModule
+    if not (flyModule and flyModule.IsFlying) then
+        self.Humanoid.WalkSpeed = self.CurrentWalkSpeed
+        print("[⚡ 速度模块] 地面速度已设置为：" .. self.CurrentWalkSpeed)
     end
 end
 
 -- 初始化速度模块
 local function init()
-    -- 初始化默认速度（先等待角色加载）
-    getCharacter()
-    if SM.Humanoid then -- 这里用 SM.Humanoid，而不是 self.Humanoid
-        SM.Humanoid.WalkSpeed = SM.CurrentWalkSpeed
+    -- 先尝试获取角色，失败则延迟重试
+    if not getCharacter() then
+        warn("[速度模块] 首次获取角色失败，将在1秒后重试...")
+        task.wait(1)
+        getCharacter() -- 第二次尝试
     end
-    
+
+    -- 只有成功获取到Humanoid才设置初始速度
+    if SM.Humanoid then
+        SM.Humanoid.WalkSpeed = SM.CurrentWalkSpeed
+        print("[速度模块] 初始速度已设置为：" .. SM.CurrentWalkSpeed)
+    else
+        warn("[速度模块] 无法设置初始速度：Humanoid仍不存在，将在角色重生时自动设置")
+    end
+
     -- 绑定+/-键调速
     UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed then return end
@@ -62,13 +93,15 @@ local function init()
             SM:setWalkSpeed(SM.CurrentWalkSpeed - 10)
         end
     end)
-    
+
     -- 角色重生重置速度
     Players.LocalPlayer.CharacterAdded:Connect(function()
         task.wait(0.5)
+        -- 重生后重新获取角色并设置速度
+        getCharacter()
         SM:setWalkSpeed(SM.CurrentWalkSpeed)
     end)
-    
+
     print("[✅ 速度模块] 加载成功 | +/-键调节速度（每次±10）")
 end
 
