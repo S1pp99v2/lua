@@ -85,3 +85,6 @@ end
 
 -- 启动飞行模块
 initFlyModule()
+-- 暴露函数供UI模块调用
+getgenv().toggleFlying = toggleFlying
+getgenv().IsFlying = IsFlying
