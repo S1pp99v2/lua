@@ -11,10 +11,6 @@ local LocalPlayer = Players.LocalPlayer
 local UI = nil
 local MenuOpen = false
 
--- 全局滑块更新函数（修复：不用SetAttribute存函数）
-local WalkSpeedSliderSetValue = nil
-local FlySpeedSliderSetValue = nil
-
 -- ===================== 核心配置 =====================
 local Config = {
     -- 速度配置
@@ -69,6 +65,8 @@ local function applyWalkSpeed(speed)
         Config.Humanoid.WalkSpeed = Config.WalkSpeed
         print("[⚡ 速度模块] 地面速度已设置为：" .. Config.WalkSpeed)
     end
+    -- 更新UI滑块显示
+    updateWalkSpeedSliderUI()
 end
 
 -- 设置飞行速度
@@ -76,6 +74,8 @@ local function setFlySpeed(speed)
     local numSpeed = tonumber(speed) or 50
     Config.FlySpeed = math.clamp(numSpeed, Config.FlySpeedMin, Config.FlySpeedMax)
     print("[✈️ 飞行模块] 飞行速度已设置为：" .. Config.FlySpeed)
+    -- 更新UI滑块显示
+    updateFlySpeedSliderUI()
 end
 
 -- ===================== 飞行模块 =====================
@@ -189,8 +189,54 @@ local function tweenUI(obj, props, duration)
     return tween
 end
 
--- 创建滑块控件
-local function createSlider(parent, position, minVal, maxVal, defaultValue, onChange)
+-- 更新地面速度滑块UI（直接查找元素）
+local function updateWalkSpeedSliderUI()
+    if not UI then return end
+    local speedCard = UI:FindFirstChild("MainMenu", true):FindFirstChild("SpeedCard", true)
+    if not speedCard then return end
+    
+    local sliderContainer = speedCard:FindFirstChild("SliderContainer")
+    if not sliderContainer then return end
+    local track = sliderContainer:FindFirstChild("Track")
+    if not track then return end
+    local fill = track:FindFirstChild("Fill")
+    local handle = track:FindFirstChild("Handle")
+    local valueDisplay = sliderContainer:FindFirstChild("ValueDisplay")
+    
+    if fill and handle and valueDisplay then
+        local normalized = (Config.WalkSpeed - Config.WalkSpeedMin) / (Config.WalkSpeedMax - Config.WalkSpeedMin)
+        normalized = math.clamp(normalized, 0, 1)
+        tweenUI(fill, {Size = UDim2.new(normalized, 0, 1, 0)}, 0.1)
+        tweenUI(handle, {Position = UDim2.new(normalized, -9, 0.5, -9)}, 0.1)
+        valueDisplay.Text = tostring(Config.WalkSpeed)
+    end
+end
+
+-- 更新飞行速度滑块UI（直接查找元素）
+local function updateFlySpeedSliderUI()
+    if not UI then return end
+    local flyCard = UI:FindFirstChild("MainMenu", true):FindFirstChild("FlyCard", true)
+    if not flyCard then return end
+    
+    local sliderContainer = flyCard:FindFirstChild("SliderContainer")
+    if not sliderContainer then return end
+    local track = sliderContainer:FindFirstChild("Track")
+    if not track then return end
+    local fill = track:FindFirstChild("Fill")
+    local handle = track:FindFirstChild("Handle")
+    local valueDisplay = sliderContainer:FindFirstChild("ValueDisplay")
+    
+    if fill and handle and valueDisplay then
+        local normalized = (Config.FlySpeed - Config.FlySpeedMin) / (Config.FlySpeedMax - Config.FlySpeedMin)
+        normalized = math.clamp(normalized, 0, 1)
+        tweenUI(fill, {Size = UDim2.new(normalized, 0, 1, 0)}, 0.1)
+        tweenUI(handle, {Position = UDim2.new(normalized, -9, 0.5, -9)}, 0.1)
+        valueDisplay.Text = tostring(Config.FlySpeed)
+    end
+end
+
+-- 创建滑块控件（完全不使用函数属性）
+local function createSlider(parent, position, minVal, maxVal, defaultValue, onChange, titleText)
     local sliderContainer = Instance.new("Frame")
     sliderContainer.Name = "SliderContainer"
     sliderContainer.Parent = parent
@@ -205,6 +251,7 @@ local function createSlider(parent, position, minVal, maxVal, defaultValue, onCh
     sliderTitle.Size = UDim2.new(1, 0, 0, 20)
     sliderTitle.Position = UDim2.new(0, 0, 0, 0)
     sliderTitle.BackgroundTransparency = 1
+    sliderTitle.Text = titleText -- 直接在创建时设置标题
     sliderTitle.TextColor3 = STYLES.Colors.TextLight
     sliderTitle.Font = Enum.Font.Gotham
     sliderTitle.TextSize = 14
@@ -262,26 +309,22 @@ local function createSlider(parent, position, minVal, maxVal, defaultValue, onCh
     -- 滑块拖动逻辑
     local isDragging = false
     
-    local function updateSlider(value)
-        local normalized = (value - minVal)/(maxVal - minVal)
-        normalized = math.clamp(normalized, 0, 1)
-        
-        local actualValue = minVal + normalized * (maxVal - minVal)
-        actualValue = math.floor(actualValue) -- 取整
-        
+    local function updateSliderFromMouse(mouseX)
+        local trackPos = track.AbsolutePosition
+        local trackSize = track.AbsoluteSize
+        local x = math.clamp((mouseX - trackPos.X)/trackSize.X, 0, 1)
+        local value = minVal + x * (maxVal - minVal)
+        value = math.floor(value)
         -- 更新UI
+        local normalized = (value - minVal)/(maxVal - minVal)
         tweenUI(fill, {Size = UDim2.new(normalized, 0, 1, 0)}, 0.1)
         tweenUI(handle, {Position = UDim2.new(normalized, -9, 0.5, -9)}, 0.1)
-        valueDisplay.Text = tostring(actualValue)
-        
+        valueDisplay.Text = tostring(value)
         -- 回调更新数值
         if onChange then
-            onChange(actualValue)
+            onChange(value)
         end
     end
-
-    -- 初始更新
-    updateSlider(defaultValue)
 
     -- 绑定拖动事件
     handle.InputBegan:Connect(function(input)
@@ -298,37 +341,18 @@ local function createSlider(parent, position, minVal, maxVal, defaultValue, onCh
 
     UserInputService.InputChanged:Connect(function(input)
         if isDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-            local mousePos = input.Position
-            local trackPos = track.AbsolutePosition
-            local trackSize = track.AbsoluteSize
-            
-            local x = math.clamp((mousePos.X - trackPos.X)/trackSize.X, 0, 1)
-            local value = minVal + x * (maxVal - minVal)
-            updateSlider(value)
+            updateSliderFromMouse(input.Position.X)
         end
     end)
 
     -- 点击轨道跳转
     track.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            local mousePos = input.Position
-            local trackPos = track.AbsolutePosition
-            local trackSize = track.AbsoluteSize
-            
-            local x = math.clamp((mousePos.X - trackPos.X)/trackSize.X, 0, 1)
-            local value = minVal + x * (maxVal - minVal)
-            updateSlider(value)
+            updateSliderFromMouse(input.Position.X)
         end
     end)
 
-    -- 返回滑块控件和更新函数
-    return {
-        Container = sliderContainer,
-        SetValue = updateSlider,
-        SetTitle = function(title)
-            sliderTitle.Text = title
-        end
-    }
+    return sliderContainer
 end
 
 -- 更新飞行UI状态
@@ -343,18 +367,6 @@ local function updateFlyUIStatus()
         flyToggleBtn.Text = Config.IsFlying and "✅ 飞行已开启" or "❌ 飞行已关闭"
         flyStatusText.Text = Config.IsFlying and "开启" or "关闭"
         flyStatusText.TextColor3 = Config.IsFlying and STYLES.Colors.Success or STYLES.Colors.Danger
-    end
-end
-
--- 更新速度UI状态
-local function updateSpeedUIStatus()
-    if not UI then return end
-    
-    if WalkSpeedSliderSetValue then
-        WalkSpeedSliderSetValue(Config.WalkSpeed)
-    end
-    if FlySpeedSliderSetValue then
-        FlySpeedSliderSetValue(Config.FlySpeed)
     end
 end
 
@@ -472,7 +484,7 @@ local function createUI()
     SpeedCardTitle.Font = Enum.Font.GothamBold
     SpeedCardTitle.TextSize = 18
 
-    -- 地面速度滑块
+    -- 地面速度滑块（直接在创建时传入标题）
     local walkSpeedSlider = createSlider(
         SpeedCard,
         UDim2.new(0, 0, 0, 45),
@@ -481,11 +493,9 @@ local function createUI()
         Config.WalkSpeed,
         function(value)
             applyWalkSpeed(value)
-        end
+        end,
+        "地面移动速度 (0-500)" -- 直接传入标题文本
     )
-    walkSpeedSlider.SetTitle("地面移动速度 (0-500)")
-    -- 修复：把更新函数存到全局变量，不用SetAttribute
-    WalkSpeedSliderSetValue = walkSpeedSlider.SetValue
 
     local SpeedResetBtn = Instance.new("TextButton")
     SpeedResetBtn.Parent = SpeedCard
@@ -502,9 +512,6 @@ local function createUI()
 
     SpeedResetBtn.MouseButton1Click:Connect(function()
         applyWalkSpeed(16)
-        if WalkSpeedSliderSetValue then
-            WalkSpeedSliderSetValue(16)
-        end
         tweenUI(SpeedResetBtn, {BackgroundColor3 = STYLES.Colors.Accent}, 0.1)
         task.wait(0.2)
         tweenUI(SpeedResetBtn, {BackgroundColor3 = STYLES.Colors.Danger}, 0.1)
@@ -580,7 +587,7 @@ local function createUI()
         toggleFlying()
     end)
 
-    -- 飞行速度滑块
+    -- 飞行速度滑块（直接在创建时传入标题）
     local flySpeedSlider = createSlider(
         FlyCard,
         UDim2.new(0, 0, 0, 130),
@@ -589,11 +596,9 @@ local function createUI()
         Config.FlySpeed,
         function(value)
             setFlySpeed(value)
-        end
+        end,
+        "飞行速度 (10-200)" -- 直接传入标题文本
     )
-    flySpeedSlider.SetTitle("飞行速度 (10-200)")
-    -- 修复：把更新函数存到全局变量，不用SetAttribute
-    FlySpeedSliderSetValue = flySpeedSlider.SetValue
 
     -- ========== 菜单开关逻辑 ==========
     local function toggleMenu()
@@ -641,10 +646,8 @@ local function init()
         if gameProcessed then return end
         if input.KeyCode == Enum.KeyCode.Plus or input.KeyCode == Enum.KeyCode.Equals then
             adjustWalkSpeed(10)
-            updateSpeedUIStatus()
         elseif input.KeyCode == Enum.KeyCode.Minus then
             adjustWalkSpeed(-10)
-            updateSpeedUIStatus()
         end
     end)
 
@@ -655,7 +658,8 @@ local function init()
         applyWalkSpeed(Config.WalkSpeed)
         if UI then
             updateFlyUIStatus()
-            updateSpeedUIStatus()
+            updateWalkSpeedSliderUI()
+            updateFlySpeedSliderUI()
         end
     end)
 
