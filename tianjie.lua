@@ -140,6 +140,31 @@ local function hellDeepest(clears)
 	return best
 end
 
+local function rankOf(id)
+	for _, b in ipairs(HELL_BEASTS) do
+		if b.id == id then
+			return b.rank
+		end
+	end
+end
+
+-- 打输过的层记在这里，本局不再主动选。放 getgenv 里，重跑脚本不会忘，
+-- 免得每次重跑都白送一场探路。执行器新开会话才会清空。
+local hellBlocked = {}
+do
+	local env = _G
+	pcall(function()
+		if type(getgenv) == "function" and type(getgenv()) == "table" then
+			env = getgenv()
+		end
+	end)
+	if type(env.__TianjieHellBlocked) == "table" then
+		hellBlocked = env.__TianjieHellBlocked
+	else
+		env.__TianjieHellBlocked = hellBlocked
+	end
+end
+
 -- 选中宗门，保持 SECTS 的固定顺序，轮流时次序才稳定
 local function sectPicks()
 	local out = {}
@@ -777,14 +802,17 @@ task.spawn(function()
 						local id, grade, nonce = res:match("^([^:]+):(%a+):(%d+)$")
 						if nonce ~= nil and nonce == hellNonce then
 							hellNonce = nil
+							local r = rankOf(id)
 							if grade == "won" then
 								hellWins = hellWins + 1
-							elseif grade == "lost" and type(id) == "string" then
-								for _, hb in ipairs(HELL_BEASTS) do
-									if hb.id == id then
-										hellRank = math.max(1, hb.rank - 1)
-									end
+								-- 赢了就往上爬一层，让已解锁的更深层能接上
+								if r then
+									hellRank = r + 1
 								end
+							elseif grade == "lost" and r then
+								-- 这层打不过，标记掉并退一层
+								hellBlocked[r] = true
+								hellRank = math.max(1, r - 1)
 							end
 						end
 					end
@@ -794,10 +822,21 @@ task.spawn(function()
 				local fresh = tonumber(s.hellFreshLeft) or 0
 				local deepest = hellDeepest(clears)
 
-				-- 只有第一次进来、或者自己爬得比当前目标更深时才重设，
-				-- 免得上轮因为打输下调过的档位又被顶回去
-				if hellRank == nil or hellRank > deepest then
-					hellRank = CFG.HellDeepest and deepest or 1
+				if not CFG.HellDeepest then
+					hellRank = 1
+				else
+					-- 首次进入从已解锁的最深层开始试
+					if hellRank == nil then
+						hellRank = deepest
+					end
+					-- 目标超出解锁范围就落回最深（比如飞升后进度清空）
+					if hellRank > deepest then
+						hellRank = deepest
+					end
+					-- 打不过的层往下退到能打的
+					while hellRank > 1 and hellBlocked[hellRank] do
+						hellRank = hellRank - 1
+					end
 				end
 
 				if hellLbl then
