@@ -520,10 +520,10 @@ task.spawn(function()
 			inFight = false
 		end
 		-- 打超过 MAX_SECONDS 判卡住，否则会一直点着不走位
-		if dungeonFight and os.clock() - fightAt > 300 then
+		if dungeonFight and os.clock() - fightAt > 330 then
 			dungeonFight = false
 		end
-		if hellFight and os.clock() - fightAt > 300 then
+		if hellFight and os.clock() - fightAt > 330 then
 			hellFight = false
 		end
 		task.wait(math.max(0.09, tonumber(CFG.TapRate) or 0.1))
@@ -588,19 +588,42 @@ end
 
 local function uiClick(b)
 	if not b then
-		return
+		return false
 	end
+	local fired = false
 	pcall(function()
 		if type(firesignal) == "function" then
 			firesignal(b.MouseButton1Click)
+			fired = true
 			return
 		end
 		if type(getconnections) == "function" then
 			for _, c in ipairs(getconnections(b.MouseButton1Click)) do
 				c:Fire()
 			end
+			fired = true
 		end
 	end)
+	if fired then
+		return true
+	end
+	-- 退路：执行器没有 firesignal/getconnections 时，把指针移到按钮中心真点一下
+	local pos, size = b.AbsolutePosition, b.AbsoluteSize
+	if type(pos) ~= "Vector2" or type(size) ~= "Vector2" then
+		return false
+	end
+	local x = math.floor(pos.X + size.X / 2)
+	local y = math.floor(pos.Y + size.Y / 2)
+	pcall(function()
+		if type(mousemoveabs) == "function" then
+			mousemoveabs(x, y)
+		end
+		if type(mouse1click) == "function" then
+			mouse1click(x, y)
+			fired = true
+		end
+	end)
+	return fired
 end
 
 local function findBtn(root, name)
@@ -821,10 +844,14 @@ local function tryCloseResult()
 		return false
 	end
 	local close = res:FindFirstChild("Close")
-	if close and close:IsA("GuiButton") then
-		uiClick(close)
+	if not (close and close:IsA("GuiButton")) then
+		print("[Tianjie] 结果界面在，但找不到 Close 按钮")
+		return false
+	end
+	if uiClick(close) then
 		return true
 	end
+	print("[Tianjie] 结果界面的 Close 点不动（没有 firesignal/getconnections/mouse1click）")
 	return false
 end
 
@@ -849,10 +876,10 @@ end
 -- 打输会被服务端记为 lost：本局把目标档位下调一层，不再往上顶。
 task.spawn(function()
 	while alive() do
-		-- 我们发起的战斗结束后会停在结果界面，先点掉它。
-		-- 点掉会同步走 backToStart()，HellResult 当场就有了，所以放在读属性之前，
-		-- 这样同一轮就能认领结果，不用再等一秒。
-		if (CFG.Hell and hellFight) or (CFG.Boss and inFight) then
+		-- 战斗结束后会停在结果界面，必须点掉它。
+		-- 这里刻意不依赖 hellFight/inFight：那两位在超时或状态不同步时可能已经是
+		-- false，结果就是界面留着没人点、下一场也发不出去。只要对应的自动化开着就点。
+		if CFG.Hell or CFG.Boss then
 			tryCloseResult()
 		end
 		if CFG.Hell then
@@ -863,8 +890,9 @@ task.spawn(function()
 
 					if hellFight then
 						local ended = res ~= hellSeen
-						-- 发起后迟迟没有任何结果回来，说明这场根本没被受理
-						local lost = fightAt > 0 and os.clock() - fightAt > 60
+						-- 一场最长可能打到 MAX_SECONDS = 300，超时值必须比它大，
+						-- 否则深度战斗（血量按 1.13^(rank-1) 涨）会被误判成没结果
+						local lost = fightAt > 0 and os.clock() - fightAt > 330
 						if ended then
 							hellSeen = res
 							local id, grade
