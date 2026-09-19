@@ -54,6 +54,7 @@ local CFG = {
 	Boss = false,
 	Explore = false,
 	ExploreStage = "village",
+	TapRate = 0.1,
 	Hell = false,
 	HellDiff = "normal",
 	HellAuto = true,
@@ -493,8 +494,9 @@ task.spawn(function()
 	end
 end)
 
--- 战斗点击统一走这里。节奏对齐 MS-Boss 的 HERO_ATTACK_RELEASE = 0.3，
--- 副本野兽原来只在探索循环里每 1.2 秒点一次，必然打输。
+-- 战斗点击统一走这里。节奏对齐 MS-Boss 的 TAP_COOLDOWN = 0.09（doTap 里
+-- 0.09 秒内的重复点击会被丢掉），所以默认 0.1 秒约 10 次/秒。
+-- 之前误用了 HERO_ATTACK_RELEASE = 0.3，那是动画释放窗口不是输入上限，慢了 3 倍多。
 task.spawn(function()
 	while alive() do
 		if (CFG.Boss and inFight) or dungeonFight or hellFight then
@@ -512,7 +514,7 @@ task.spawn(function()
 		if hellFight and os.clock() - fightAt > 300 then
 			hellFight = false
 		end
-		task.wait(0.3)
+		task.wait(math.max(0.09, tonumber(CFG.TapRate) or 0.1))
 	end
 end)
 
@@ -794,11 +796,37 @@ task.spawn(function()
 	end
 end)
 
+-- 战斗结束会停在结果界面（u5 = "result"），必须点掉它的 Close 才会继续：
+-- backToStart() 是唯一写出 HellResult 的地方，也把 u5 复位成 "closed"。
+-- 不点的话拿不到结果、openHell 也会因为 u5 ~= "closed" 直接 return，下一场发不出去。
+local function tryCloseResult()
+	local b = bossUI()
+	if not b then
+		return false
+	end
+	local res = b:FindFirstChild("Result")
+	if not (res and res:IsA("GuiObject") and res.Visible) then
+		return false
+	end
+	local close = res:FindFirstChild("Close")
+	if close and close:IsA("GuiButton") then
+		uiClick(close)
+		return true
+	end
+	return false
+end
+
 -- 地狱门战斗。开战方式是给 BossUI 设 Hell 属性（原版 UI 就是这么发的），
 -- 不是直接调 remote。结果从 HellResult 回读，值会变所以用轮询比对。
 -- 打输会被服务端记为 lost：本局把目标档位下调一层，不再往上顶。
 task.spawn(function()
 	while alive() do
+		-- 我们发起的战斗结束后会停在结果界面，先点掉它。
+		-- 点掉会同步走 backToStart()，HellResult 当场就有了，所以放在读属性之前，
+		-- 这样同一轮就能认领结果，不用再等一秒。
+		if (CFG.Hell and hellFight) or (CFG.Boss and inFight) then
+			tryCloseResult()
+		end
 		if CFG.Hell then
 				local s = State()
 				local b = bossUI()
@@ -1712,6 +1740,14 @@ end, function()
 	local i = table.find(STAGES, CFG.ExploreStage) or 1
 	CFG.ExploreStage = STAGES[(i % #STAGES) + 1]
 end, 78)
+InputRow(p4, "攻击间隔秒", function()
+	return CFG.TapRate
+end, function(v)
+	-- 游戏自己的上限是 TAP_COOLDOWN = 0.09，再低会被丢
+	CFG.TapRate = math.max(0.09, v)
+end, 58)
+local tapTip = InfoRow(p4, Color3.fromRGB(110, 118, 138))
+tapTip.Text = "0.09 是游戏上限(约11次/秒) · 越高越慢"
 exploreLbl = InfoRow(p4, Color3.fromRGB(150, 200, 255))
 exploreLbl.Text = "探索次数 —"
 
