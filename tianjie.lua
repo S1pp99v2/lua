@@ -54,6 +54,14 @@ local CFG = {
 	Boss = false,
 	Explore = false,
 	ExploreStage = "village",
+	Hell = false,
+	HellDiff = "normal",
+	HellDeepest = true,
+	HellAgain = 6,
+	HellFreshOnly = true,
+	HellMarket = false,
+	HellBuy = "h_sbe_100",
+	HellReserve = 0,
 	AntiAFK = false,
 	AutoClaimAFK = false,
 	AFKClaimMin = 900,
@@ -89,6 +97,49 @@ local function sectById(id)
 	end
 end
 
+-- 地狱门：10 只兽按 rank 顺序解锁，第 N 只要第 N-1 只至少赢过 1 次（任意难度）。
+-- id 与 MS-Hell.lua 的 "hell_"..rank 对齐，名字取那里的 hanzi。
+local HELL_BEASTS = {
+	{ rank = 1, id = "hell_1", name = "灰犬" },
+	{ rank = 2, id = "hell_2", name = "燼豬" },
+	{ rank = 3, id = "hell_3", name = "血豹" },
+	{ rank = 4, id = "hell_4", name = "鐵蜥" },
+	{ rank = 5, id = "hell_5", name = "魂蠍" },
+	{ rank = 6, id = "hell_6", name = "獄獅" },
+	{ rank = 7, id = "hell_7", name = "獄犬" },
+	{ rank = 8, id = "hell_8", name = "焰鳳" },
+	{ rank = 9, id = "hell_9", name = "淵蛇" },
+	{ rank = 10, id = "hell_10", name = "獄龍" },
+}
+
+-- 四试炼，倍率取自 MS-Hell 的 essence 字段
+local HELL_DIFFS = { "easy", "normal", "hard", "nightmare" }
+
+-- 地狱市场可反复买的只有精华（蛋是解锁用的一次性品），成本即数字本身
+local HELL_BUYS = { "h_sbe_100", "h_sbe_1000", "h_sbe_10000" }
+local HELL_BUY_COST = { h_sbe_100 = 100, h_sbe_1000 = 1000, h_sbe_10000 = 10000 }
+
+local function hellUnlocked(clears, rank)
+	if rank <= 1 then
+		return true
+	end
+	local prev = HELL_BEASTS[rank - 1]
+	return prev ~= nil and (tonumber((clears or {})[prev.id]) or 0) >= 1
+end
+
+-- 已解锁的最深一层，用来挑精华最高的目标
+local function hellDeepest(clears)
+	local best = 1
+	for _, b in ipairs(HELL_BEASTS) do
+		if hellUnlocked(clears, b.rank) then
+			best = b.rank
+		else
+			break
+		end
+	end
+	return best
+end
+
 -- 选中宗门，保持 SECTS 的固定顺序，轮流时次序才稳定
 local function sectPicks()
 	local out = {}
@@ -120,10 +171,15 @@ local afkSince = 0
 local lastClaim = 0
 local inFight = false
 local dungeonFight = false
+local hellFight = false
 local fightAt = 0
 local dodgeId = nil
+local hellSeen = nil
+local hellNonce = nil
+local hellRank = nil
+local hellWins = 0
 local ascendCount = 0
-local ascendLbl, rollLbl, afkLbl, statLbl, exploreLbl
+local ascendLbl, rollLbl, afkLbl, statLbl, exploreLbl, hellLbl
 
 local function gate(key, secs)
 	local t = os.clock()
@@ -323,15 +379,15 @@ BS.RE.Event.OnClientEvent:Connect(function(e)
 	local k = e.kind
 	if k == "telegraph" then
 		dodgeId = e.id
-		-- 副本野兽和独立 Boss 共用 BossService，任一在打都要闪避
-		if not (inFight or dungeonFight) then
+		-- 副本野兽、独立 Boss、地狱兽共用 BossService，任一在打都要闪避
+		if not (inFight or dungeonFight or hellFight) then
 			return
 		end
 		task.spawn(function()
 			local id = e.id
 			if e.style == "spam" then
 				for i = 1, 11 do
-					if not (inFight or dungeonFight) or dodgeId ~= id then
+					if not (inFight or dungeonFight or hellFight) or dodgeId ~= id then
 						return
 					end
 					pcall(function()
@@ -341,7 +397,7 @@ BS.RE.Event.OnClientEvent:Connect(function(e)
 				end
 			else
 				task.wait((e.duration or 1.2) * 0.87)
-				if (inFight or dungeonFight) and dodgeId == id then
+				if (inFight or dungeonFight or hellFight) and dodgeId == id then
 					pcall(function()
 						BS.RE.Input:FireServer({ kind = "dodge", id = id })
 					end)
@@ -405,7 +461,7 @@ end)
 -- 副本野兽原来只在探索循环里每 1.2 秒点一次，必然打输。
 task.spawn(function()
 	while alive() do
-		if (CFG.Boss and inFight) or dungeonFight then
+		if (CFG.Boss and inFight) or dungeonFight or hellFight then
 			pcall(function()
 				BS.RE.Input:FireServer({ kind = "tap" })
 			end)
@@ -416,6 +472,9 @@ task.spawn(function()
 		-- 打超过 MAX_SECONDS 判卡住，否则会一直点着不走位
 		if dungeonFight and os.clock() - fightAt > 300 then
 			dungeonFight = false
+		end
+		if hellFight and os.clock() - fightAt > 300 then
+			hellFight = false
 		end
 		task.wait(0.3)
 	end
@@ -457,6 +516,24 @@ local dungeonAt = 0
 
 local function ascUI()
 	return PG:FindFirstChild("AscensionUI")
+end
+
+-- 地狱战和副本兽战都由 BossUI 驱动，它是 AscensionUI 的子节点。
+-- 地狱开战靠设 BossUI 的 Hell 属性，结果从 HellResult 属性回读。
+local function bossUI()
+	local ui = ascUI()
+	if not ui then
+		return nil
+	end
+	local b = ui:FindFirstChild("BossUI")
+	if b then
+		return b
+	end
+	for _, d in ipairs(ui:GetDescendants()) do
+		if d.Name == "BossUI" then
+			return d
+		end
+	end
 end
 
 local function uiClick(b)
@@ -678,6 +755,97 @@ task.spawn(function()
 			end
 		end
 		task.wait(1.2)
+	end
+end)
+
+-- 地狱门战斗。开战方式是给 BossUI 设 Hell 属性（原版 UI 就是这么发的），
+-- 不是直接调 remote。结果从 HellResult 回读，值会变所以用轮询比对。
+-- 打输会被服务端记为 lost：本局把目标档位下调一层，不再往上顶。
+task.spawn(function()
+	while alive() do
+		if CFG.Hell then
+			local s = State()
+			local b = bossUI()
+			if s and b then
+				local res = b:GetAttribute("HellResult")
+				if res ~= hellSeen then
+					hellSeen = res
+					hellFight = false
+					-- HellResult 是 "<兽id>:<won|lost>:<nonce>"，只认自己发起的那个 nonce，
+					-- 否则会把手动打的残留结果算进来。
+					if type(res) == "string" then
+						local id, grade, nonce = res:match("^([^:]+):(%a+):(%d+)$")
+						if nonce ~= nil and nonce == hellNonce then
+							hellNonce = nil
+							if grade == "won" then
+								hellWins = hellWins + 1
+							elseif grade == "lost" and type(id) == "string" then
+								for _, hb in ipairs(HELL_BEASTS) do
+									if hb.id == id then
+										hellRank = math.max(1, hb.rank - 1)
+									end
+								end
+							end
+						end
+					end
+				end
+
+				local clears = s.hellClears or {}
+				local fresh = tonumber(s.hellFreshLeft) or 0
+				local deepest = hellDeepest(clears)
+
+				-- 只有第一次进来、或者自己爬得比当前目标更深时才重设，
+				-- 免得上轮因为打输下调过的档位又被顶回去
+				if hellRank == nil or hellRank > deepest then
+					hellRank = CFG.HellDeepest and deepest or 1
+				end
+
+				if hellLbl then
+					hellLbl.Text = ("地狱 %d 胜 · 打第%d层 · 5倍剩%d"):format(hellWins, hellRank, fresh)
+				end
+
+				local canGo = (not CFG.HellFreshOnly) or fresh > 0
+				if canGo and not hellFight and gate("hell", math.max(2, CFG.HellAgain or 6)) then
+					local target = HELL_BEASTS[hellRank]
+					if target and hellUnlocked(clears, hellRank) then
+						local nonce = math.floor(os.clock() * 1000)
+						local ok = pcall(function()
+							b:SetAttribute("Hell", ("%s:%s:%d"):format(
+								target.id,
+								CFG.HellDiff or "normal",
+								nonce
+							))
+						end)
+						if ok then
+							hellNonce = tostring(nonce)
+							hellFight = true
+							fightAt = os.clock()
+						end
+					end
+				end
+			end
+		elseif hellFight then
+			hellFight = false
+		end
+		task.wait(1)
+	end
+end)
+
+-- 地狱市场。HellTrade 挂在 BossService 上，不是 CultivationService。
+task.spawn(function()
+	while alive() do
+		if CFG.HellMarket then
+			local s = State()
+			if s then
+				local id = CFG.HellBuy or "h_sbe_100"
+				local cost = HELL_BUY_COST[id] or 100
+				local essence = tonumber(s.hellEssence) or 0
+				if essence >= cost + (tonumber(CFG.HellReserve) or 0) and gate("hellbuy", 8) then
+					call(BS.RF.HellTrade.InvokeServer, BS.RF.HellTrade, id)
+				end
+			end
+		end
+		task.wait(2)
 	end
 end)
 
@@ -964,8 +1132,18 @@ tbLine.BorderSizePixel = 0
 local justDragged = 0
 local moveMode = false
 local TABS = {}
+local tabButtons = {}
 local activeTab = 1
 local pages = {}
+
+-- 页签宽度按实际数量分配，加页签不用再手改除数
+local function layoutTabs()
+	local n = math.max(#TABS, 1)
+	for i, b in ipairs(tabButtons) do
+		b.Size = UDim2.new(1 / n, 0, 1, 0)
+		b.Position = UDim2.new((i - 1) / n, 0, 0, 0)
+	end
+end
 
 local function addTab(name)
 	local i = #TABS + 1
@@ -1007,6 +1185,7 @@ local function addTab(name)
 		end
 		relayout()
 	end)
+	tabButtons[i] = b
 	return b
 end
 
@@ -1268,9 +1447,11 @@ addTab("核心")
 addTab("宗门")
 addTab("灵根")
 addTab("战斗")
+addTab("地狱")
 addTab("AFK")
+layoutTabs()
 
-local p1, p2, p3, p4, p5 = newPage(), newPage(), newPage(), newPage(), newPage()
+local p1, p2, p3, p4, p5, p6 = newPage(), newPage(), newPage(), newPage(), newPage(), newPage()
 
 Toggle(p1, "自动突破", "Breakthrough")
 Toggle(p1, "最大精炼", "Refine")
@@ -1373,21 +1554,52 @@ end, 78)
 exploreLbl = InfoRow(p4, Color3.fromRGB(150, 200, 255))
 exploreLbl.Text = "探索次数 —"
 
-Toggle(p5, "Anti-AFK 保活", "AntiAFK")
-Toggle(p5, "自动领挂机奖励", "AutoClaimAFK")
-InputRow(p5, "心跳间隔秒", function()
+Toggle(p5, "自动地狱门", "Hell")
+CycleRow(p5, "地狱难度", function()
+	return CFG.HellDiff
+end, function()
+	local i = table.find(HELL_DIFFS, CFG.HellDiff) or 1
+	CFG.HellDiff = HELL_DIFFS[(i % #HELL_DIFFS) + 1]
+end, 78)
+Toggle(p5, "打最深一层", "HellDeepest")
+Toggle(p5, "只在 5 倍期打", "HellFreshOnly")
+InputRow(p5, "开战间隔秒", function()
+	return CFG.HellAgain
+end, function(v)
+	CFG.HellAgain = math.max(2, v)
+end, 52)
+hellLbl = InfoRow(p5, Color3.fromRGB(232, 150, 90))
+hellLbl.Text = "地狱 0 胜 · 待机"
+local hellTip = InfoRow(p5, Color3.fromRGB(110, 118, 138))
+hellTip.Text = "打输自动降一层 · 每天前10场5倍，之后仅30%"
+Toggle(p5, "自动买地狱精华", "HellMarket")
+CycleRow(p5, "购买目标", function()
+	return CFG.HellBuy
+end, function()
+	local i = table.find(HELL_BUYS, CFG.HellBuy) or 1
+	CFG.HellBuy = HELL_BUYS[(i % #HELL_BUYS) + 1]
+end, 88)
+InputRow(p5, "精华保留量", function()
+	return CFG.HellReserve
+end, function(v)
+	CFG.HellReserve = v
+end, 58)
+
+Toggle(p6, "Anti-AFK 保活", "AntiAFK")
+Toggle(p6, "自动领挂机奖励", "AutoClaimAFK")
+InputRow(p6, "心跳间隔秒", function()
 	return CFG.Heartbeat
 end, function(v)
 	CFG.Heartbeat = math.max(5, v)
 end, 52)
-InputRow(p5, "挂机多久才领", function()
+InputRow(p6, "挂机多久才领", function()
 	return CFG.AFKClaimMin
 end, function(v)
 	CFG.AFKClaimMin = math.max(30, v)
 end, 52)
-afkLbl = InfoRow(p5, Color3.fromRGB(130, 220, 190))
+afkLbl = InfoRow(p6, Color3.fromRGB(130, 220, 190))
 afkLbl.Text = "未挂机"
-local hbTip = InfoRow(p5, Color3.fromRGB(110, 118, 138))
+local hbTip = InfoRow(p6, Color3.fromRGB(110, 118, 138))
 hbTip.Text = "保活方式: 检测中"
 
 statLbl = Instance.new("TextLabel", panel)
