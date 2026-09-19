@@ -19,6 +19,17 @@ local function alive()
 	return getgenv().__TianjieGen == GEN
 end
 
+-- 挂在游戏对象上的连接不会随 GUI 销毁，退出时要手动断，先登记起来。
+-- 界面自身的连接绑在会被 Destroy 的实例上，不用登记。
+local conns = {}
+
+local function track(c)
+	if c then
+		conns[#conns + 1] = c
+	end
+	return c
+end
+
 local CS = RS.Packages.Knit.Services.CultivationService
 local BS = RS.Packages.Knit.Services.BossService
 local DS = RS.Packages.Knit.Services.DungeonService
@@ -361,7 +372,7 @@ local function heartbeat()
 	hbMode = "VirtualUser"
 end
 
-LP.Idled:Connect(function()
+track(LP.Idled:Connect(function()
 	if not CFG.AntiAFK then
 		return
 	end
@@ -370,7 +381,7 @@ LP.Idled:Connect(function()
 		VU:ClickButton2(Vector2.new())
 	end)
 	hbAt = os.clock()
-end)
+end))
 
 task.spawn(function()
 	while alive() do
@@ -409,7 +420,7 @@ task.spawn(function()
 	end
 end)
 
-BS.RE.Event.OnClientEvent:Connect(function(e)
+track(BS.RE.Event.OnClientEvent:Connect(function(e)
 	if not alive() or type(e) ~= "table" then
 		return
 	end
@@ -444,7 +455,7 @@ BS.RE.Event.OnClientEvent:Connect(function(e)
 	elseif k == "result" or k == "end" or k == "over" then
 		inFight = false
 	end
-end)
+end))
 
 task.spawn(function()
 	while alive() do
@@ -1146,6 +1157,38 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.DisplayOrder = 999999
 gui.Parent = PG
 
+-- 退出并清理：停掉所有循环、断开挂在游戏对象上的连接、销毁界面、清掉暴露的全局。
+-- 关键点是 __TianjieGen 只能往上加、不能置 nil —— alive() 是拿它与自己捕获的 GEN
+-- 比对，置 nil 会让下一个实例拿到相同的 GEN，已经死掉的旧实例会被"复活"。
+local function shutdown()
+	pcall(function()
+		local g = getgenv()
+		if type(g) == "table" then
+			g.__TianjieGen = (tonumber(g.__TianjieGen) or 0) + 1
+		end
+	end)
+	local n = #conns
+	for _, c in ipairs(conns) do
+		pcall(function()
+			c:Disconnect()
+		end)
+	end
+	table.clear(conns)
+	pcall(function()
+		gui:Destroy()
+	end)
+	pcall(function()
+		local g = getgenv()
+		if type(g) == "table" then
+			g.TianjieCfg = nil
+			g.__TianjieHellBlocked = nil
+			g._TianjieScriptUrls = nil
+			g._TianjieScriptUrl = nil
+		end
+	end)
+	print(("[Tianjie] 已退出并清理（断开 %d 个连接）"):format(n))
+end
+
 local cam = workspace.CurrentCamera
 local touch = UIS.TouchEnabled and not UIS.MouseEnabled
 local function uiScale()
@@ -1669,6 +1712,11 @@ end, function(v)
 end, 58)
 ascendLbl = InfoRow(p1, Color3.fromRGB(150, 200, 255))
 ascendLbl.Text = "重生 0 次"
+CycleRow(p1, "退出并清理脚本", function()
+	return "点我退出"
+end, shutdown, 88)
+local exitTip = InfoRow(p1, Color3.fromRGB(110, 118, 138))
+exitTip.Text = "停所有循环 · 断连接 · 销毁界面"
 
 Toggle(p2, "自动加入宗门", "JoinSect")
 CycleRow(p2, "宗门模式", function()
@@ -1884,7 +1932,7 @@ task.spawn(function()
 	end
 end)
 
-cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+track(cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
 	task.wait(0.25)
 	SC = uiScale()
 	WIDE = math.floor(268 * SC)
@@ -1904,7 +1952,7 @@ cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
 	end
 	relayout()
 	clampPos()
-end)
+end))
 
 local function setCollapsed(v)
 	collapsed = v
@@ -1951,11 +1999,11 @@ panel.InputBegan:Connect(function(i)
 end)
 
 panel.InputEnded:Connect(endDrag)
-UIS.InputEnded:Connect(function(i)
+track(UIS.InputEnded:Connect(function(i)
 	if i.UserInputType == Enum.UserInputType.Touch then
 		endDrag()
 	end
-end)
+end))
 
 local function onDrag(i)
 	if not dragActive then
@@ -1970,8 +2018,8 @@ local function onDrag(i)
 	end
 end
 
-UIS.InputChanged:Connect(onDrag)
-UIS.TouchMoved:Connect(onDrag)
+track(UIS.InputChanged:Connect(onDrag))
+track(UIS.TouchMoved:Connect(onDrag))
 
 task.spawn(function()
 	while alive() do
