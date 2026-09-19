@@ -148,20 +148,31 @@ local function rankOf(id)
 	end
 end
 
--- 打输过的层记在这里，本局不再主动选。放 getgenv 里，重跑脚本不会忘，
--- 免得每次重跑都白送一场探路。执行器新开会话才会清空。
-local hellBlocked = {}
-do
-	local env = _G
-	pcall(function()
-		if type(getgenv) == "function" and type(getgenv()) == "table" then
-			env = getgenv()
-		end
-	end)
-	if type(env.__TianjieHellBlocked) == "table" then
-		hellBlocked = env.__TianjieHellBlocked
-	else
-		env.__TianjieHellBlocked = hellBlocked
+-- 失败的层不永久封死，只冷却一段时间再允许重试；否则一旦某层被误判失败，
+-- 就再也爬不上去了。只存在本次会话里，重跑脚本自动恢复干净状态。
+local HELL_RETRY_SECS = 180
+local hellRetryAt = {}
+
+-- 早先的版本把「打不过的层」持久化在 getgenv 里，bug 期间攒下了脏数据、
+-- 而且重跑脚本也不会清。这里主动删掉那个键，免得旧标记继续压着层数。
+pcall(function()
+	local g = _G
+	if type(getgenv) == "function" and type(getgenv()) == "table" then
+		g = getgenv()
+	end
+	if g.__TianjieHellBlocked ~= nil then
+		g.__TianjieHellBlocked = nil
+	end
+end)
+
+local function hellCooling(rank)
+	local t = hellRetryAt[rank]
+	return t ~= nil and os.clock() < t
+end
+
+local function hellFail(rank)
+	if rank then
+		hellRetryAt[rank] = os.clock() + HELL_RETRY_SECS
 	end
 end
 
@@ -788,77 +799,98 @@ end)
 task.spawn(function()
 	while alive() do
 		if CFG.Hell then
-			local s = State()
-			local b = bossUI()
-			if s and b then
-				local res = b:GetAttribute("HellResult")
-				if res ~= hellSeen then
-					hellSeen = res
-					-- HellResult 是 "<兽id>:<won|lost|fled>:<nonce>"，但那个 nonce 是
-					-- 结束战斗时新生成的，不是我们发起时写进 Hell 属性的那个，所以
-					-- 不能拿 nonce 配对。只能用「有战斗在飞 + 兽 id 对得上」来认领。
-					if hellFight and type(res) == "string" then
-						local id, grade = res:match("^([^:]+):(%a+):%d+$")
-						local r = type(id) == "string" and rankOf(id) or nil
-						if r and hellRank == r then
+				local s = State()
+				local b = bossUI()
+				if s and b then
+					local res = b:GetAttribute("HellResult")
+
+					if hellFight then
+						local ended = res ~= hellSeen
+						-- 发起后迟迟没有任何结果回来，说明这场根本没被受理
+						local lost = fightAt > 0 and os.clock() - fightAt > 60
+						if ended then
+							hellSeen = res
+							local id, grade
+							if type(res) == "string" then
+								-- "<兽id>:<won|lost|fled>:<结束时间戳>"
+								id, grade = res:match("^([^:]+):(%a+):%d+$")
+							end
+							local r = id and rankOf(id) or nil
+							if r then
+								hellFight = false
+								if grade == "won" then
+									hellWins = hellWins + 1
+									-- 封顶在第 10 层：再往上就没有兽了，越界会让整个
+									-- 自动化停摆（连刷精华都不做）。到顶就一直刷第 10 层。
+									hellRank = math.min(r + 1, #HELL_BEASTS)
+									print(("[Tianjie] 地狱 %s 赢 -> 下一层 %d"):format(id, hellRank))
+								else
+									-- lost = 打不过；fled = 服务端拒绝 Begin
+									-- （没次数/门槛不够）或中途退出。都要降下来并冷却。
+									print(("[Tianjie] 地狱 %s 判定 %s -> 降层"):format(id, tostring(grade)))
+									hellFail(r)
+									hellRank = math.max(1, r - 1)
+								end
+							else
+								print(("[Tianjie] 地狱结果解析失败: %s"):format(tostring(res)))
+							end
+						elseif lost then
 							hellFight = false
-							if grade == "won" then
-								hellWins = hellWins + 1
-								-- 赢了往上爬一层，让已解锁的更深层能接上
-								hellRank = r + 1
-							elseif grade == "lost" or grade == "fled" then
-								-- lost = 打不过；fled = 服务端拒绝 Begin（没次数/门槛不够）
-								-- 或中途退出。两种都要把这一层降下来，否则会对着它反复发起。
-								hellBlocked[r] = true
-								hellRank = math.max(1, r - 1)
+							local t = HELL_BEASTS[hellRank or 0]
+							if t then
+								print(("[Tianjie] 地狱 %s 发起后 60 秒无结果 -> 按失败降层"):format(t.id))
+								hellFail(t.rank)
+								hellRank = math.max(1, t.rank - 1)
 							end
 						end
+					else
+						-- 没在打的时候只同步，不认领任何结果
+						hellSeen = res
 					end
-				end
 
-				local clears = s.hellClears or {}
-				local fresh = tonumber(s.hellFreshLeft) or 0
-				local deepest = hellDeepest(clears)
+					local clears = s.hellClears or {}
+					local fresh = tonumber(s.hellFreshLeft) or 0
 
-				if not CFG.HellDeepest then
-					hellRank = 1
-				else
-					-- 首次进入从已解锁的最深层开始试
-					if hellRank == nil then
-						hellRank = deepest
-					end
-					-- 目标超出解锁范围就落回最深（比如飞升后进度清空）
-					if hellRank > deepest then
-						hellRank = deepest
-					end
-					-- 打不过的层往下退到能打的
-					while hellRank > 1 and hellBlocked[hellRank] do
-						hellRank = hellRank - 1
-					end
-				end
-
-				if hellLbl then
-					hellLbl.Text = ("地狱 %d 胜 · 打第%d层 · 5倍剩%d"):format(hellWins, hellRank, fresh)
-				end
-
-				local canGo = (not CFG.HellFreshOnly) or fresh > 0
-				if canGo and not hellFight and gate("hell", math.max(2, CFG.HellAgain or 6)) then
-					local target = HELL_BEASTS[hellRank]
-					if target and hellUnlocked(clears, hellRank) then
-						-- 末尾这个数字必须每次都变：游戏端靠 GetAttributeChangedSignal("Hell")
-						-- 感知开战，值不变就不会触发。
-						local nonce = math.floor(os.clock() * 1000)
-						local ok = pcall(function()
-							b:SetAttribute("Hell", ("%s:%s:%d"):format(
-								target.id,
-								CFG.HellDiff or "normal",
-								nonce
-							))
-						end)
-						if ok then
-							hellFight = true
-							fightAt = os.clock()
+					if not CFG.HellDeepest then
+						hellRank = 1
+					else
+						-- 首次进入从已解锁的最深层开始试
+						if hellRank == nil then
+							hellRank = hellDeepest(clears)
 						end
+						-- 冷却中的层往下退到能打的。冷却到期就自然会重回该层，
+						-- 不像以前那样永久封死（那会让某一层误判后就再也爬不上去）。
+						while hellRank > 1 and hellCooling(hellRank) do
+							hellRank = hellRank - 1
+						end
+					end
+
+					if hellLbl then
+						hellLbl.Text = ("地狱 %d 胜 · 打第%d层 · 5倍剩%d"):format(hellWins, hellRank, fresh)
+					end
+
+					local canGo = (not CFG.HellFreshOnly) or fresh > 0
+					if canGo and not hellFight and gate("hell", math.max(2, CFG.HellAgain or 6)) then
+						local target = HELL_BEASTS[hellRank]
+						if target and hellUnlocked(clears, hellRank) then
+							-- 先把当前结果同步掉，这样之后的变化一定是这一场产生的，
+							-- 不会把上一场的残留结果误认成这一场的。
+							hellSeen = res
+							-- 末尾这个数字必须每次都变：游戏端靠 GetAttributeChangedSignal("Hell")
+							-- 感知开战，值不变就不会触发。
+							local nonce = math.floor(os.clock() * 1000)
+							local ok = pcall(function()
+								b:SetAttribute("Hell", ("%s:%s:%d"):format(
+									target.id,
+									CFG.HellDiff or "normal",
+									nonce
+								))
+							end)
+							if ok then
+								hellFight = true
+								fightAt = os.clock()
+								print(("[Tianjie] 地狱发起 %s:%s"):format(target.id, CFG.HellDiff or "normal"))
+							end
 					end
 				end
 			end
@@ -1622,6 +1654,13 @@ InputRow(p5, "精华保留量", function()
 end, function(v)
 	CFG.HellReserve = v
 end, 58)
+CycleRow(p5, "重置地狱冷却", function()
+	return "点我清空"
+end, function()
+	hellRetryAt = {}
+	hellRank = nil
+	print("[Tianjie] 地狱冷却已清空，重新从最深层开始")
+end, 92)
 
 Toggle(p6, "Anti-AFK 保活", "AntiAFK")
 Toggle(p6, "自动领挂机奖励", "AutoClaimAFK")
