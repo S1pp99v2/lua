@@ -227,7 +227,8 @@ local hellSeen = nil
 local hellRank = nil
 local hellWins = 0
 local ascendCount = 0
-local ascendLbl, rollLbl, afkLbl, statLbl, exploreLbl, hellLbl
+local ascendLbl, rollLbl, afkLbl, statLbl, exploreLbl, hellLbl, hellTipLbl
+local hellWhy = nil
 
 local function gate(key, secs)
 	local t = os.clock()
@@ -827,6 +828,22 @@ local function tryCloseResult()
 	return false
 end
 
+-- 拒绝原因和剩余次数都写在 BossUI.Start.Status 上，游戏自己也是从那儿 warn 的。
+-- 直接读出来显示，省得去翻 Output。（必须放在 bossUI 之后）
+local function fightStatusText()
+	local b = bossUI()
+	if not b then
+		return nil
+	end
+	local st = b:FindFirstChild("Start")
+	st = st and st:FindFirstChild("Status")
+	local txt = st and st.Text
+	if type(txt) == "string" and txt ~= "" then
+		return txt
+	end
+	return nil
+end
+
 -- 地狱门战斗。开战方式是给 BossUI 设 Hell 属性（原版 UI 就是这么发的），
 -- 不是直接调 remote。结果从 HellResult 回读，值会变所以用轮询比对。
 -- 打输会被服务端记为 lost：本局把目标档位下调一层，不再往上顶。
@@ -869,7 +886,12 @@ task.spawn(function()
 										print(("[Tianjie] 地狱 %s 赢（手动指定，继续打它）"):format(id))
 									end
 								else
-									print(("[Tianjie] 地狱 %s 判定 %s"):format(id, tostring(grade)))
+									hellWhy = fightStatusText()
+									print(("[Tianjie] 地狱 %s 判定 %s%s"):format(
+										id,
+										tostring(grade),
+										hellWhy and (" · 原因: " .. hellWhy) or ""
+									))
 									hellFail(r)
 									if CFG.HellAuto then
 										hellRank = math.max(1, r - 1)
@@ -925,6 +947,11 @@ task.spawn(function()
 							suffix,
 							fresh
 						)
+					end
+					if hellTipLbl then
+						-- 被拒的原因 / 剩余次数原本只在 Output 里，这里直接摆出来
+						hellTipLbl.Text = hellWhy and ("上次被拒: " .. hellWhy)
+							or "点下面名字=指定打它 · 自动模式会打赢往深爬、打输降层"
 					end
 
 					local canGo = (not CFG.HellFreshOnly) or fresh > 0
@@ -1823,8 +1850,8 @@ end, function(v)
 end, 52)
 hellLbl = InfoRow(p5, Color3.fromRGB(232, 150, 90))
 hellLbl.Text = "地狱 0 胜 · 待机"
-local hellTip = InfoRow(p5, Color3.fromRGB(110, 118, 138))
-hellTip.Text = "点下面名字=指定打它 · 自动模式会打赢往深爬、打输降层"
+hellTipLbl = InfoRow(p5, Color3.fromRGB(110, 118, 138))
+hellTipLbl.Text = "点下面名字=指定打它 · 自动模式会打赢往深爬、打输降层"
 for _, def in ipairs(HELL_BEASTS) do
 	HellRow(p5, def)
 end
