@@ -892,9 +892,15 @@ task.spawn(function()
 										tostring(grade),
 										hellWhy and (" · 原因: " .. hellWhy) or ""
 									))
-									hellFail(r)
-									if CFG.HellAuto then
-										hellRank = math.max(1, r - 1)
+									-- 「次数用完」不是这层打不过，别因此把层级降下来，
+									-- 否则次数一耗尽就会一路退到第1层，白丢进度。
+									local noTries = type(hellWhy) == "string"
+										and string.find(string.lower(hellWhy), "tries", 1, true) ~= nil
+									if not noTries then
+										hellFail(r)
+										if CFG.HellAuto then
+											hellRank = math.max(1, r - 1)
+										end
 									end
 								end
 							else
@@ -919,6 +925,14 @@ task.spawn(function()
 					local clears = s.hellClears or {}
 					local fresh = tonumber(s.hellFreshLeft) or 0
 
+					-- 地狱和独立 Boss 共用同一份次数预算。次数用完时服务端会直接拒绝
+					-- Begin（"No tries left. They return in MM:SS."），所以先看次数，
+					-- 别去撞墙。字段缺失时按"有次数"处理，免得老版本状态卡死自动化。
+					local tries = tonumber(s.bossTries)
+					local triesMax = tonumber(s.bossTriesMax) or 10
+					local readyIn = tonumber(s.bossReadyIn) or 0
+					local hasTries = (tries == nil) or (tries > 0 and readyIn <= 0)
+
 					if not CFG.HellAuto then
 						-- 手动指定：就盯着点的那一只，不自动升降
 						hellRank = math.max(1, math.min(tonumber(CFG.HellPick) or 1, #HELL_BEASTS))
@@ -941,10 +955,19 @@ task.spawn(function()
 							-- 手动指定了没解锁的兽时要说出来，否则看着像没反应
 							suffix = (t and not hellUnlocked(clears, t.rank)) and "(未解锁)" or "(手动)"
 						end
-						hellLbl.Text = ("地狱 %d 胜 · 打%s%s · 5倍剩%d"):format(
+						local tryTxt
+						if tries == nil then
+							tryTxt = "次数?"
+						elseif hasTries then
+							tryTxt = ("次数%d/%d"):format(tries, triesMax)
+						else
+							tryTxt = ("次数0·%d:%02d后恢复"):format(readyIn // 60, readyIn % 60)
+						end
+						hellLbl.Text = ("地狱 %d 胜 · 打%s%s · %s · 5倍剩%d"):format(
 							hellWins,
 							t and ("%d.%s"):format(t.rank, t.name) or "?",
 							suffix,
+							tryTxt,
 							fresh
 						)
 					end
@@ -954,7 +977,7 @@ task.spawn(function()
 							or "点下面名字=指定打它 · 自动模式会打赢往深爬、打输降层"
 					end
 
-					local canGo = (not CFG.HellFreshOnly) or fresh > 0
+					local canGo = hasTries and ((not CFG.HellFreshOnly) or fresh > 0)
 					if canGo and not hellFight and gate("hell", math.max(2, CFG.HellAgain or 6)) then
 						local target = HELL_BEASTS[hellRank]
 						-- 冷却中的层先不发：手动指定时也一样，避免对着打不了的层硬刷
