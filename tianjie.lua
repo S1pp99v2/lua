@@ -200,7 +200,6 @@ local hellFight = false
 local fightAt = 0
 local dodgeId = nil
 local hellSeen = nil
-local hellNonce = nil
 local hellRank = nil
 local hellWins = 0
 local ascendCount = 0
@@ -795,22 +794,21 @@ task.spawn(function()
 				local res = b:GetAttribute("HellResult")
 				if res ~= hellSeen then
 					hellSeen = res
-					hellFight = false
-					-- HellResult 是 "<兽id>:<won|lost>:<nonce>"，只认自己发起的那个 nonce，
-					-- 否则会把手动打的残留结果算进来。
-					if type(res) == "string" then
-						local id, grade, nonce = res:match("^([^:]+):(%a+):(%d+)$")
-						if nonce ~= nil and nonce == hellNonce then
-							hellNonce = nil
-							local r = rankOf(id)
+					-- HellResult 是 "<兽id>:<won|lost|fled>:<nonce>"，但那个 nonce 是
+					-- 结束战斗时新生成的，不是我们发起时写进 Hell 属性的那个，所以
+					-- 不能拿 nonce 配对。只能用「有战斗在飞 + 兽 id 对得上」来认领。
+					if hellFight and type(res) == "string" then
+						local id, grade = res:match("^([^:]+):(%a+):%d+$")
+						local r = type(id) == "string" and rankOf(id) or nil
+						if r and hellRank == r then
+							hellFight = false
 							if grade == "won" then
 								hellWins = hellWins + 1
-								-- 赢了就往上爬一层，让已解锁的更深层能接上
-								if r then
-									hellRank = r + 1
-								end
-							elseif grade == "lost" and r then
-								-- 这层打不过，标记掉并退一层
+								-- 赢了往上爬一层，让已解锁的更深层能接上
+								hellRank = r + 1
+							elseif grade == "lost" or grade == "fled" then
+								-- lost = 打不过；fled = 服务端拒绝 Begin（没次数/门槛不够）
+								-- 或中途退出。两种都要把这一层降下来，否则会对着它反复发起。
 								hellBlocked[r] = true
 								hellRank = math.max(1, r - 1)
 							end
@@ -847,6 +845,8 @@ task.spawn(function()
 				if canGo and not hellFight and gate("hell", math.max(2, CFG.HellAgain or 6)) then
 					local target = HELL_BEASTS[hellRank]
 					if target and hellUnlocked(clears, hellRank) then
+						-- 末尾这个数字必须每次都变：游戏端靠 GetAttributeChangedSignal("Hell")
+						-- 感知开战，值不变就不会触发。
 						local nonce = math.floor(os.clock() * 1000)
 						local ok = pcall(function()
 							b:SetAttribute("Hell", ("%s:%s:%d"):format(
@@ -856,7 +856,6 @@ task.spawn(function()
 							))
 						end)
 						if ok then
-							hellNonce = tostring(nonce)
 							hellFight = true
 							fightAt = os.clock()
 						end

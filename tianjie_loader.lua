@@ -97,12 +97,18 @@ local function urlList()
 	local stamp = tostring(os.time())
 	local sha = latestSha()
 	local list = {}
-	-- 钉在具体提交号上，绕开 jsDelivr 对 @main 的缓存
+	-- m1/m2 是同一份内容的两套主机名，国内 cdn.jsdelivr.net 常被挡而 fastly 还能通，
+	-- 所以 fastly 放前面。钉提交号是为了绕开 jsDelivr 对 @main 的缓存。
+	local hosts = { "fastly.jsdelivr.net", "cdn.jsdelivr.net" }
 	if type(sha) == "string" and #sha >= 7 then
-		list[#list + 1] = "https://cdn.jsdelivr.net/gh/" .. REPO .. "@" .. sha .. "/" .. FILE
+		for _, h in ipairs(hosts) do
+			list[#list + 1] = "https://" .. h .. "/gh/" .. REPO .. "@" .. sha .. "/" .. FILE
+		end
 		print("[Tianjie] commit " .. string.sub(sha, 1, 7))
 	end
-	list[#list + 1] = "https://cdn.jsdelivr.net/gh/" .. REPO .. "@main/" .. FILE .. "?t=" .. stamp
+	for _, h in ipairs(hosts) do
+		list[#list + 1] = "https://" .. h .. "/gh/" .. REPO .. "@main/" .. FILE .. "?t=" .. stamp
+	end
 	list[#list + 1] = "https://raw.githubusercontent.com/" .. REPO .. "/main/" .. FILE .. "?t=" .. stamp
 	list[#list + 1] = "https://github.com/" .. REPO .. "/raw/main/" .. FILE .. "?t=" .. stamp
 	return list
