@@ -56,7 +56,8 @@ local CFG = {
 	ExploreStage = "village",
 	Hell = false,
 	HellDiff = "normal",
-	HellDeepest = true,
+	HellAuto = true,
+	HellPick = 1,
 	HellAgain = 6,
 	HellFreshOnly = true,
 	HellMarket = false,
@@ -820,16 +821,20 @@ task.spawn(function()
 								hellFight = false
 								if grade == "won" then
 									hellWins = hellWins + 1
-									-- 封顶在第 10 层：再往上就没有兽了，越界会让整个
-									-- 自动化停摆（连刷精华都不做）。到顶就一直刷第 10 层。
-									hellRank = math.min(r + 1, #HELL_BEASTS)
-									print(("[Tianjie] 地狱 %s 赢 -> 下一层 %d"):format(id, hellRank))
+									if CFG.HellAuto then
+										-- 封顶在第 10 层：再往上就没有兽了，越界会让整个
+										-- 自动化停摆（连刷精华都不做）。到顶就一直刷第 10 层。
+										hellRank = math.min(r + 1, #HELL_BEASTS)
+										print(("[Tianjie] 地狱 %s 赢 -> 下一层 %d"):format(id, hellRank))
+									else
+										print(("[Tianjie] 地狱 %s 赢（手动指定，继续打它）"):format(id))
+									end
 								else
-									-- lost = 打不过；fled = 服务端拒绝 Begin
-									-- （没次数/门槛不够）或中途退出。都要降下来并冷却。
-									print(("[Tianjie] 地狱 %s 判定 %s -> 降层"):format(id, tostring(grade)))
+									print(("[Tianjie] 地狱 %s 判定 %s"):format(id, tostring(grade)))
 									hellFail(r)
-									hellRank = math.max(1, r - 1)
+									if CFG.HellAuto then
+										hellRank = math.max(1, r - 1)
+									end
 								end
 							else
 								print(("[Tianjie] 地狱结果解析失败: %s"):format(tostring(res)))
@@ -838,9 +843,11 @@ task.spawn(function()
 							hellFight = false
 							local t = HELL_BEASTS[hellRank or 0]
 							if t then
-								print(("[Tianjie] 地狱 %s 发起后 60 秒无结果 -> 按失败降层"):format(t.id))
+								print(("[Tianjie] 地狱 %s 发起后 60 秒无结果 -> 冷却该层"):format(t.id))
 								hellFail(t.rank)
-								hellRank = math.max(1, t.rank - 1)
+								if CFG.HellAuto then
+									hellRank = math.max(1, t.rank - 1)
+								end
 							end
 						end
 					else
@@ -851,8 +858,9 @@ task.spawn(function()
 					local clears = s.hellClears or {}
 					local fresh = tonumber(s.hellFreshLeft) or 0
 
-					if not CFG.HellDeepest then
-						hellRank = 1
+					if not CFG.HellAuto then
+						-- 手动指定：就盯着点的那一只，不自动升降
+						hellRank = math.max(1, math.min(tonumber(CFG.HellPick) or 1, #HELL_BEASTS))
 					else
 						-- 首次进入从已解锁的最深层开始试
 						if hellRank == nil then
@@ -866,13 +874,25 @@ task.spawn(function()
 					end
 
 					if hellLbl then
-						hellLbl.Text = ("地狱 %d 胜 · 打第%d层 · 5倍剩%d"):format(hellWins, hellRank, fresh)
+						local t = HELL_BEASTS[hellRank]
+						local suffix = ""
+						if not CFG.HellAuto then
+							-- 手动指定了没解锁的兽时要说出来，否则看着像没反应
+							suffix = (t and not hellUnlocked(clears, t.rank)) and "(未解锁)" or "(手动)"
+						end
+						hellLbl.Text = ("地狱 %d 胜 · 打%s%s · 5倍剩%d"):format(
+							hellWins,
+							t and ("%d.%s"):format(t.rank, t.name) or "?",
+							suffix,
+							fresh
+						)
 					end
 
 					local canGo = (not CFG.HellFreshOnly) or fresh > 0
 					if canGo and not hellFight and gate("hell", math.max(2, CFG.HellAgain or 6)) then
 						local target = HELL_BEASTS[hellRank]
-						if target and hellUnlocked(clears, hellRank) then
+						-- 冷却中的层先不发：手动指定时也一样，避免对着打不了的层硬刷
+						if target and not hellCooling(hellRank) and hellUnlocked(clears, hellRank) then
 							-- 先把当前结果同步掉，这样之后的变化一定是这一场产生的，
 							-- 不会把上一场的残留结果误认成这一场的。
 							hellSeen = res
@@ -1464,6 +1484,77 @@ local function SectRow(page, def)
 	end)
 end
 
+-- 地狱兽选择行：点谁打谁，并把「选层方式」切到手动。单选，点一个顶掉其他。
+local hellPainters = {}
+
+local function repaintHell()
+	for _, p in ipairs(hellPainters) do
+		p(false)
+	end
+end
+
+local function HellRow(page, def)
+	local row = Instance.new("TextButton", page)
+	row.Size = UDim2.new(1, 0, 0, ROWH)
+	row.BackgroundTransparency = 1
+	row.Text = ""
+	row.AutoButtonColor = false
+
+	local nm = Instance.new("TextLabel", row)
+	nm.Size = UDim2.new(1, -58, 1, 0)
+	nm.Position = UDim2.new(0, 2, 0, 0)
+	nm.BackgroundTransparency = 1
+	nm.Text = ("%d. %s"):format(def.rank, def.name)
+	nm.Font = Enum.Font.Gotham
+	nm.TextSize = 13
+	nm.TextColor3 = Color3.fromRGB(196, 204, 220)
+	nm.TextXAlignment = Enum.TextXAlignment.Left
+
+	local track = Instance.new("Frame", row)
+	track.Size = UDim2.new(0, 40, 0, 20)
+	track.AnchorPoint = Vector2.new(1, 0.5)
+	track.Position = UDim2.new(1, 0, 0.5, 0)
+	track.BackgroundColor3 = Color3.fromRGB(50, 55, 72)
+	track.BorderSizePixel = 0
+	Instance.new("UICorner", track).CornerRadius = UDim.new(0, 4)
+
+	local knob = Instance.new("Frame", track)
+	knob.Size = UDim2.new(0, 14, 0, 14)
+	knob.Position = UDim2.new(0, 3, 0.5, -7)
+	knob.BackgroundColor3 = Color3.fromRGB(148, 156, 175)
+	knob.BorderSizePixel = 0
+	Instance.new("UICorner", knob).CornerRadius = UDim.new(0, 4)
+
+	local function paint(anim)
+		-- 手动模式下选中那一只才亮
+		local on = (not CFG.HellAuto) and (tonumber(CFG.HellPick) == def.rank)
+		local ti = TweenInfo.new(anim and 0.22 or 0, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+		TWS:Create(knob, ti, {
+			Position = on and UDim2.new(0, 23, 0.5, -7) or UDim2.new(0, 3, 0.5, -7),
+			BackgroundColor3 = on and Color3.fromRGB(96, 232, 180) or Color3.fromRGB(148, 156, 175),
+		}):Play()
+		TWS:Create(track, ti, {
+			BackgroundColor3 = on and Color3.fromRGB(28, 68, 58) or Color3.fromRGB(50, 55, 72),
+		}):Play()
+		TWS:Create(nm, ti, {
+			TextColor3 = on and Color3.fromRGB(242, 248, 255) or Color3.fromRGB(150, 158, 176),
+		}):Play()
+	end
+	hellPainters[#hellPainters + 1] = paint
+	paint(false)
+
+	row.MouseButton1Click:Connect(function()
+		if os.clock() - justDragged < 0.25 then
+			return
+		end
+		CFG.HellAuto = false
+		CFG.HellPick = def.rank
+		hellRank = def.rank
+		repaintHell()
+		print(("[Tianjie] 地狱目标改为 %d.%s（手动）"):format(def.rank, def.name))
+	end)
+end
+
 local function InputRow(page, label, get, set, width)
 	local row = Instance.new("Frame", page)
 	row.Size = UDim2.new(1, 0, 0, ROWH)
@@ -1631,7 +1722,15 @@ end, function()
 	local i = table.find(HELL_DIFFS, CFG.HellDiff) or 1
 	CFG.HellDiff = HELL_DIFFS[(i % #HELL_DIFFS) + 1]
 end, 78)
-Toggle(p5, "打最深一层", "HellDeepest")
+CycleRow(p5, "选层方式", function()
+	return CFG.HellAuto and "自动·打最深" or "手动·指定"
+end, function()
+	CFG.HellAuto = not CFG.HellAuto
+	if CFG.HellAuto then
+		hellRank = nil -- 回自动就重新从最深层算起
+	end
+	repaintHell()
+end, 100)
 Toggle(p5, "只在 5 倍期打", "HellFreshOnly")
 InputRow(p5, "开战间隔秒", function()
 	return CFG.HellAgain
@@ -1641,7 +1740,10 @@ end, 52)
 hellLbl = InfoRow(p5, Color3.fromRGB(232, 150, 90))
 hellLbl.Text = "地狱 0 胜 · 待机"
 local hellTip = InfoRow(p5, Color3.fromRGB(110, 118, 138))
-hellTip.Text = "打输自动降一层 · 每天前10场5倍，之后仅30%"
+hellTip.Text = "点下面名字=指定打它 · 自动模式会打赢往深爬、打输降层"
+for _, def in ipairs(HELL_BEASTS) do
+	HellRow(p5, def)
+end
 Toggle(p5, "自动买地狱精华", "HellMarket")
 CycleRow(p5, "购买目标", function()
 	return CFG.HellBuy
